@@ -1,0 +1,67 @@
+.app-root {
+    display: grid;
+    grid-template-columns: 300px 1fr 360px;
+    gap: 12px;
+    height: 100vh;
+    padding: 12px;
+    box-sizing: border-box;
+}
+
+.left-col,
+.center-col,
+.right-col {
+    background: #fff;
+    border-radius: 6px;
+    padding: 12px;
+    box-shadow: 0 0 6px rgba(0, 0, 0, 0.05);
+    overflow: auto;
+}
+
+.upload-panel input {
+    margin-bottom: 8px;
+}
+
+.history-panel ul {
+    list-style: none;
+    padding: 0;
+}
+
+.history-panel li {
+    padding: 8px;
+    border-bottom: 1px solid #eee;
+    cursor: pointer;
+}
+
+.hist-row {
+    display: flex;
+    justify-content: space-between;
+}
+
+.doc-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.chat-panel .messages {
+    min-height: 200px;
+    max-height: 60vh;
+    overflow: auto;
+    background: #fafafa;
+    padding: 8px;
+    border-radius: 6px;
+    margin-bottom: 8px;
+}
+
+.msg.user {
+    text-align: right;
+}
+
+.msg.assistant {
+    text-align: left;
+}
+
+.input-row {
+    display: flex;
+    gap: 8px;
+}

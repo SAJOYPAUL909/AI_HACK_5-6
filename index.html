@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG Chat Interface</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        /* Custom Scrollbar for Chat Area */
+        .scrollbar-hide::-webkit-scrollbar {
+            display: none;
+        }
+
+        .scrollbar-hide {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+
+        .typing-dot {
+            animation: typing 1.4s infinite ease-in-out both;
+        }
+
+        .typing-dot:nth-child(1) {
+            animation-delay: -0.32s;
+        }
+
+        .typing-dot:nth-child(2) {
+            animation-delay: -0.16s;
+        }
+
+        @keyframes typing {
+
+            0%,
+            80%,
+            100% {
+                transform: scale(0);
+            }
+
+            40% {
+                transform: scale(1);
+            }
+        }
+    </style>
+</head>
+
+<body class="bg-gray-900 text-gray-100 h-screen flex overflow-hidden font-sans">
+
+    <aside class="w-80 bg-gray-800 border-r border-gray-700 flex flex-col transition-all duration-300" id="sidebar">
+        <div class="p-6 border-b border-gray-700 flex justify-between items-center">
+            <h1 class="text-xl font-bold text-blue-400"><i class="fas fa-brain mr-2"></i>RAG Application</h1>
+        </div>
+
+        <div class="p-6 overflow-y-auto flex-1">
+            <div class="mb-6">
+                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">LLM Settings</h3>
+
+                <label class="block text-sm mb-2 text-gray-300">Provider URL</label>
+                <input type="text" id="baseUrl" value="https://openrouter.ai/api/v1"
+                    class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-sm focus:border-blue-500 outline-none transition"
+                    placeholder="e.g. https://openrouter.ai/api/v1">
+                <p class="text-xs text-gray-500 mt-1">Default: Local Ollama</p>
+
+                <label class="block text-sm mt-4 mb-2 text-gray-300">Model Name</label>
+                <input type="text" id="modelName" value="meta-llama/llama-3.3-70b-instruct:free"
+                    class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-sm focus:border-blue-500 outline-none transition">
+
+                <label class="block text-sm mt-4 mb-2 text-gray-300">API Key</label>
+                <input type="password" id="apiKey" value="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"
+                    class="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 text-sm focus:border-blue-500 outline-none transition"
+                    placeholder="Optional for Local">
+            </div>
+
+            <div class="border-t border-gray-700 pt-6">
+                <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Knowledge Base</h3>
+
+                <div class="flex items-center justify-center w-full">
+                    <label for="file-upload"
+                        class="flex flex-col items-center justify-center w-full h-32 border-2 border-gray-600 border-dashed rounded-lg cursor-pointer hover:bg-gray-700 transition">
+                        <div class="flex flex-col items-center justify-center pt-5 pb-6">
+                            <i class="fas fa-cloud-upload-alt text-2xl text-gray-400 mb-2"></i>
+                            <p class="text-sm text-gray-400"><span class="font-semibold">Click to upload</span> PDF</p>
+                        </div>
+                        <input id="file-upload" type="file" class="hidden" accept=".pdf" />
+                    </label>
+                </div>
+                <div id="upload-status" class="mt-2 text-xs text-center text-gray-500"></div>
+            </div>
+        </div>
+    </aside>
+
+    <main class="flex-1 flex flex-col relative">
+
+        <header class="h-16 bg-gray-800 border-b border-gray-700 flex items-center px-6 shadow-md z-10">
+            <div class="flex items-center">
+                <span class="w-2 h-2 rounded-full bg-green-500 mr-2"></span>
+                <span class="text-sm font-medium text-gray-300" id="connection-status">System Ready</span>
+            </div>
+        </header>
+
+        <div id="chat-container" class="flex-1 overflow-y-auto p-6 space-y-4 scrollbar-hide scroll-smooth">
+            <div class="flex gap-4">
+                <div class="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center flex-shrink-0">
+                    <i class="fas fa-robot text-sm"></i>
+                </div>
+                <div class="bg-gray-800 p-4 rounded-lg rounded-tl-none max-w-2xl border border-gray-700 shadow-sm">
+                    <p class="text-sm text-gray-200">Hello! I'm your RAG Assistant. Upload a PDF in the sidebar to get
+                        started, or configure your LLM settings.</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="p-4 bg-gray-800 border-t border-gray-700">
+            <div class="max-w-4xl mx-auto relative">
+                <textarea id="user-input" rows="1"
+                    class="w-full bg-gray-900 text-gray-100 border border-gray-600 rounded-xl pl-4 pr-12 py-3 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none resize-none overflow-hidden"
+                    placeholder="Ask a question about your document..."></textarea>
+
+                <button id="send-btn"
+                    class="absolute right-2 bottom-2 bg-blue-600 hover:bg-blue-700 text-white p-2 rounded-lg transition-colors">
+                    <i class="fas fa-paper-plane text-sm"></i>
+                </button>
+            </div>
+            <p class="text-center text-xs text-gray-500 mt-2">AI can make mistakes. Check source documents.</p>
+        </div>
+    </main>
+
+    <script>
+        const API_BASE = "http://127.0.0.1:5000/api/v1"; // Point to your Flask API
+
+        // DOM Elements
+        const chatContainer = document.getElementById('chat-container');
+        const userInput = document.getElementById('user-input');
+        const sendBtn = document.getElementById('send-btn');
+        const fileUpload = document.getElementById('file-upload');
+        const uploadStatus = document.getElementById('upload-status');
+
+        // --- 1. File Upload Logic ---
+        fileUpload.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            uploadStatus.innerHTML = '<span class="text-blue-400 animate-pulse">Uploading & Indexing...</span>';
+
+            try {
+                const response = await fetch(`${API_BASE}/ingest`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    uploadStatus.innerHTML = `<span class="text-green-400">✓ Indexed ${data.chunks_created} chunks</span>`;
+                    addBotMessage(`I've processed <b>${file.name}</b>. I'm ready to answer questions!`);
+                } else {
+                    throw new Error(data.error || 'Upload failed');
+                }
+            } catch (error) {
+                console.error(error);
+                uploadStatus.innerHTML = `<span class="text-red-400">Error: ${error.message}</span>`;
+            }
+        });
+
+        // --- 2. Chat Logic ---
+        async function handleChat() {
+            const query = userInput.value.trim();
+            if (!query) return;
+
+            // Add User Message
+            addUserMessage(query);
+            userInput.value = '';
+            userInput.style.height = 'auto'; // Reset height
+
+            // Show Loading State
+            const loadingId = addLoadingIndicator();
+
+            // Prepare Payload
+            const payload = {
+                query: query,
+                llm_config: {
+                    base_url: document.getElementById('baseUrl').value,
+                    model_name: document.getElementById('modelName').value,
+                    api_key: document.getElementById('apiKey').value
+                }
+            };
+
+            try {
+                const response = await fetch(`${API_BASE}/generate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const data = await response.json();
+
+                // Remove Loading
+                removeMessage(loadingId);
+
+                if (response.ok) {
+                    addBotMessage(data.answer, data.source_docs);
+                } else {
+                    addBotMessage(`❌ Error: ${data.error}`);
+                }
+
+            } catch (error) {
+                removeMessage(loadingId);
+                addBotMessage(`❌ Connection Error: Is the backend running?`);
+            }
+        }
+
+        // --- 3. UI Helper Functions ---
+
+        function addUserMessage(text) {
+            const div = document.createElement('div');
+            div.className = 'flex gap-4 flex-row-reverse';
+            div.innerHTML = `
+                <div class="w-8 h-8 rounded-full bg-gray-600 flex items-center justify-center flex-shrink-0">
+                    <i class="fas fa-user text-sm"></i>
+                </div>
+                <div class="bg-blue-600 p-4 rounded-lg rounded-tr-none max-w-2xl shadow-sm text-sm">
+                    <p>${escapeHtml(text)}</p>
+                </div>
+            `;
+            chatContainer.appendChild(div);
+            scrollToBottom();
+        }
+
+        function addBotMessage(text, sources = []) {
+            const div = document.createElement('div');
+            div.className = 'flex gap-4';
+
+            // Format Sources
+            let sourceHtml = '';
+            if (sources && sources.length > 0) {
+                sourceHtml = `
+                    <div class="mt-3 pt-3 border-t border-gray-600">
+                        <p class="text-xs text-gray-400 font-semibold mb-1">Sources:</p>
+                        <div class="flex gap-2 overflow-x-auto pb-1">
+                            ${sources.map((s, i) => `
+                                <div class="bg-gray-900 p-2 rounded text-xs text-gray-400 min-w-[150px] border border-gray-700">
+                                    "${escapeHtml(s)}..."
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
+            div.innerHTML = `
+                <div class="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center flex-shrink-0">
+                    <i class="fas fa-robot text-sm"></i>
+                </div>
+                <div class="bg-gray-800 p-4 rounded-lg rounded-tl-none max-w-2xl border border-gray-700 shadow-sm text-sm">
+                    <div class="prose prose-invert max-w-none">
+                        ${marked.parse(text)} </div>
+                    ${sourceHtml}
+                </div>
+            `;
+            chatContainer.appendChild(div);
+            scrollToBottom();
+        }
+
+        function addLoadingIndicator() {
+            const id = 'loading-' + Date.now();
+            const div = document.createElement('div');
+            div.id = id;
+            div.className = 'flex gap-4';
+            div.innerHTML = `
+                <div class="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center flex-shrink-0">
+                    <i class="fas fa-robot text-sm"></i>
+                </div>
+                <div class="bg-gray-800 p-4 rounded-lg rounded-tl-none border border-gray-700 shadow-sm flex items-center gap-1">
+                    <div class="w-2 h-2 bg-gray-400 rounded-full typing-dot"></div>
+                    <div class="w-2 h-2 bg-gray-400 rounded-full typing-dot"></div>
+                    <div class="w-2 h-2 bg-gray-400 rounded-full typing-dot"></div>
+                </div>
+            `;
+            chatContainer.appendChild(div);
+            scrollToBottom();
+            return id;
+        }
+
+        function removeMessage(id) {
+            const el = document.getElementById(id);
+            if (el) el.remove();
+        }
+
+        function scrollToBottom() {
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        // Utils
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Auto-resize textarea
+        userInput.addEventListener('input', function () {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
+        });
+
+        // Event Listeners
+        sendBtn.addEventListener('click', handleChat);
+        userInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleChat();
+            }
+        });
+
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</body>
+
+</html>

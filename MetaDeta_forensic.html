@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Document Tamper Check — Minimal Frontend</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial; margin: 18px; background:#f7f8fb; color:#111 }
+    h1 { margin-bottom:6px }
+    .panel { background:white; padding:14px; border-radius:10px; box-shadow:0 6px 18px rgba(20,20,60,0.06); margin-bottom:14px }
+    label { display:block; margin:8px 0 6px }
+    button { margin-top:10px; padding:8px 12px; border-radius:8px; border:0; background:#2563eb; color:white; cursor:pointer }
+    pre { background:#0b1220; color:#dbeafe; padding:12px; border-radius:8px; overflow:auto; max-height:360px }
+    img.preview { max-width:180px; max-height:140px; border-radius:6px; margin-right:8px; border:1px solid #ddd }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap }
+    .small { font-size:13px; color:#666 }
+  </style>
+</head>
+<body>
+  <h1>Document Tamper Check — Minimal Frontend</h1>
+  <div class="panel">
+    <div class="row">
+      <div>
+        <label>Gold / Original file (PDF or image)</label>
+        <input id="goldFile" type="file" accept=".pdf,image/*" />
+      </div>
+      <div>
+        <label>Suspect / Tempered file (PDF or image)</label>
+        <input id="suspectFile" type="file" accept=".pdf,image/*" />
+      </div>
+    </div>
+
+    <div style="margin-top:10px">
+      <button id="runBtn">Run Tamper Check</button>
+      <span class="small"> (Runs OCR, metadata, ELA & simple rule checks entirely client-side)</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Previews</h3>
+    <div id="previews" class="row"></div>
+  </div>
+
+  <div class="panel">
+    <h3>JSON Result</h3>
+    <pre id="output">{ "status": "waiting" }</pre>
+  </div>
+
+  <!-- Libraries: pdf.js, tesseract, exif-js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.8.162/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.1.3/dist/tesseract.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/exif-js/2.3.0/exif.min.js"></script>
+
+  <script>
+  // Minimal front-end tamper-check prototype implementing the pipeline described.
+  // Note: This is a best-effort client-side prototype. For production, move heavy work to a backend,
+  // use PaddleOCR or Tesseract server, and add stronger token alignment & heuristics.
+
+  const goldFileEl = document.getElementById('goldFile');
+  const suspectFileEl = document.getElementById('suspectFile');
+  const runBtn = document.getElementById('runBtn');
+  const output = document.getElementById('output');
+  const previews = document.getElementById('previews');
+
+  // Utility: show preview thumbnails
+  function showPreview(file, label) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = document.createElement('img');
+      img.className = 'preview';
+      if (file.type === 'application/pdf') {
+        // show a placeholder for PDFs
+        img.src = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+          `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="220"><rect width="100%" height="100%" fill="#eef2ff"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#1e3a8a" font-size="20">${label} PDF</text></svg>`
+        );
+      } else {
+        img.src = e.target.result;
+      }
+      const wrapper = document.createElement('div');
+      wrapper.appendChild(img);
+      const caption = document.createElement('div');
+      caption.innerHTML = `<div style="font-weight:600">${label}</div><div class="small">${file.name}</div>`;
+      wrapper.appendChild(caption);
+      previews.appendChild(wrapper);
+    };
+    reader.readAsDataURL(file);
+  }
+
+  // Small Levenshtein distance for fuzzy matching tokens (used to align tokens)
+  function levenshtein(a,b){ if(!a) return b?b.length:0; if(!b) return a.length; const m=a.length, n=b.length; const dp=Array(m+1).fill().map(()=>Array(n+1).fill(0)); for(let i=0;i<=m;i++)dp[i][0]=i; for(let j=0;j<=n;j++)dp[0][j]=j; for(let i=1;i<=m;i++){ for(let j=1;j<=n;j++){ dp[i][j]=Math.min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+(a[i-1]===b[j-1]?0:1)); }} return dp[m][n]; }
+
+  // ELA: compute difference between original and recompressed JPEG at lower quality.
+  // Returns grayscale diff heatmap (2D array) and an imageData URL of the diff for quick visualization.
+  async function computeELA(imageBitmap) {
+    // draw into canvas
+    const w = imageBitmap.width, h = imageBitmap.height;
+    const c1 = document.createElement('canvas'); c1.width=w; c1.height=h;
+    const ctx1 = c1.getContext('2d'); ctx1.drawImage(imageBitmap,0,0);
+    // original pixels
+    const orig = ctx1.getImageData(0,0,w,h);
+
+    // recompress to JPEG at lower quality using an offscreen canvas and toDataURL
+    const jpegDataUrl = c1.toDataURL('image/jpeg', 0.6); // recompress
+    // load recompressed
+    const img = await new Promise((res,rej)=>{
+      const i = new Image(); i.onload = ()=>res(i); i.onerror = rej; i.src = jpegDataUrl;
+    });
+    const c2 = document.createElement('canvas'); c2.width=w; c2.height=h;
+    const ctx2 = c2.getContext('2d'); ctx2.drawImage(img,0,0,w,h);
+    const recompressed = ctx2.getImageData(0,0,w,h);
+
+    // compute per-pixel absolute diff
+    const diffC = document.createElement('canvas'); diffC.width=w; diffC.height=h;
+    const diffCtx = diffC.getContext('2d'); const diffImg = diffCtx.createImageData(w,h);
+    let maxDiff = 1;
+    for (let i=0;i<orig.data.length;i+=4){
+      const r = Math.abs(orig.data[i] - recompressed.data[i]);
+      const g = Math.abs(orig.data[i+1] - recompressed.data[i+1]);
+      const b = Math.abs(orig.data[i+2] - recompressed.data[i+2]);
+      const gray = Math.round((r+g+b)/3);
+      diffImg.data[i]=diffImg.data[i+1]=diffImg.data[i+2]=gray;
+      diffImg.data[i+3]=255;
+      if (gray>maxDiff) maxDiff=gray;
+    }
+    diffCtx.putImageData(diffImg,0,0);
+
+    // compute a coarse heatmap grid (e.g., 32x32) to find hotspots
+    const grid = [];
+    const gx = 32, gy = Math.max(8, Math.round(32*(h/w)));
+    const cellW = Math.floor(w/gx), cellH = Math.floor(h/gy);
+    for (let y=0;y<gy;y++){
+      const row = [];
+      for (let x=0;x<gx;x++){
+        let sum=0, cnt=0;
+        const sx = x*cellW, sy = y*cellH;
+        for (let yy=sy; yy<Math.min(h, sy+cellH); yy+=2){
+          for (let xx=sx; xx<Math.min(w, sx+cellW); xx+=2){
+            const idx = (yy*w + xx)*4;
+            sum += diffImg.data[idx];
+            cnt++;
+          }
+        }
+        row.push(cnt ? sum/cnt : 0);
+      }
+      grid.push(row);
+    }
+
+    return { diffDataUrl: diffC.toDataURL('image/png'), grid, maxDiff };
+  }
+
+  // Extract metadata: PDFs via pdf.js, images via EXIF
+  async function extractMetadata(file) {
+    if (file.type === 'application/pdf') {
+      // use pdf.js getMetadata
+      const arrayBuffer = await file.arrayBuffer();
+      const loadingTask = pdfjsLib.getDocument({data: arrayBuffer});
+      const doc = await loadingTask.promise;
+      let info={}, metadata={};
+      try { info = await doc.getMetadata(); } catch(e){}
+      // doc._pdfInfo may contain other items
+      const basic = {
+        numPages: doc.numPages,
+        info: info.info || {},
+        metadata: (info.metadata && info.metadata.getAll()) || {},
+      };
+      return { type:'pdf', raw: basic };
+    } else {
+      // try EXIF
+      const dataUrl = await new Promise((res,rej)=>{
+        const r = new FileReader();
+        r.onload = ()=>res(r.result);
+        r.onerror = rej;
+        r.readAsArrayBuffer(file);
+      });
+      // exif-js expects binary string view from ArrayBuffer
+      let exif = {};
+      try {
+        const arr = new Uint8Array(dataUrl);
+        // exif-js doesn't support passing ArrayBuffer directly in some browsers; use blob trick:
+        const blob = new Blob([arr]);
+        await new Promise((resolve)=> {
+          const fr = new FileReader();
+          fr.onload = function(){ try { EXIF.getData({src:fr.result}, function(){ exif = EXIF.getAllTags(this) || {}; resolve(); }) } catch(e){ resolve(); } };
+          fr.readAsDataURL(blob);
+        });
+      } catch(e){}
+      return { type:'image', raw: exif };
+    }
+  }
+
+  // Render uploaded file (PDF first page or image) to an ImageBitmap for further processing
+  async function renderFileToBitmap(file) {
+    if (file.type === 'application/pdf') {
+      const arr = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({data:arr}).promise;
+      const page = await pdf.getPage(1);
+      const viewport = page.getViewport({ scale: 2 }); // higher res
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(viewport.width);
+      canvas.height = Math.round(viewport.height);
+      const ctx = canvas.getContext('2d');
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      return await createImageBitmap(canvas);
+    } else {
+      // image file
+      const url = URL.createObjectURL(file);
+      const img = await new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=rej; i.src=url; });
+      return await createImageBitmap(img);
+    }
+  }
+
+  // Run OCR using Tesseract.js and return words with bbox + confidence
+  async function runOCROnBitmap(bitmap) {
+    // draw into canvas and pass to Tesseract
+    const canvas = document.createElement('canvas'); canvas.width=bitmap.width; canvas.height=bitmap.height;
+    const ctx = canvas.getContext('2d'); ctx.drawImage(bitmap,0,0);
+    const dataUrl = canvas.toDataURL('image/png');
+    // run tesseract
+    const worker = Tesseract.createWorker({ logger: m => {/* console.log(m) */} });
+    await worker.load();
+    await worker.loadLanguage('eng'); // only english minimal; can expand
+    await worker.initialize('eng');
+    await worker.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK });
+    const res = await worker.recognize(dataUrl);
+    await worker.terminate();
+    // Tesseract.js returns hierarchical structure; convert to simple word list with bbox
+    const words = [];
+    const { data } = res;
+    if (data && data.words) {
+      data.words.forEach(w => {
+        words.push({
+          text: w.text,
+          bbox: { x: w.bbox.x0, y: w.bbox.y0, w: w.bbox.x1 - w.bbox.x0, h: w.bbox.y1 - w.bbox.y0 },
+          conf: w.confidence
+        });
+      });
+    } else if (data && data.text) {
+      // fallback: naive split
+      data.text.split(/\s+/).forEach(t=>{ if(t) words.push({text:t, bbox:null, conf:null}); });
+    }
+    return { fullText: data.text || '', words };
+  }
+
+  // compare OCR outputs & bounding boxes to detect inserted digits/extra chars, basic rules
+  function compareOCR(goldOCR, suspectOCR) {
+    const findings = [];
+    // build token map (simple: by exact match first)
+    const goldTokens = goldOCR.words.map(w=>({text:w.text, bbox:w.bbox})).filter(t=>t.text && t.text.trim());
+    const suspectTokens = suspectOCR.words.map(w=>({text:w.text, bbox:w.bbox})).filter(t=>t.text && t.text.trim());
+
+    // For each gold token, try to find best matching suspect token
+    for (let i=0;i<goldTokens.length;i++){
+      const g = goldTokens[i];
+      // try exact match first
+      let best = { idx:-1, dist:9999, tok:null };
+      for (let j=0;j<suspectTokens.length;j++){
+        const s = suspectTokens[j];
+        const d = levenshtein(g.text.toString(), s.text.toString());
+        if (d < best.dist) best = { idx:j, dist:d, tok:s };
+      }
+      if (best.idx === -1) continue;
+      const s = best.tok;
+      // if tokens differ and differ by small edit distance, mark possible inserted digit/char
+      if (g.text !== s.text) {
+        // heuristics for numbers/dates
+        const onlyDigits = txt => /^\d[\d\-\/:.]{0,}$/.test(txt);
+        if (onlyDigits(g.text) || onlyDigits(s.text)) {
+          // check length changes, overlapping bbox etc.
+          const gw = g.bbox ? g.bbox.w : null;
+          const sw = s.bbox ? s.bbox.w : null;
+          const widthChange = (gw && sw) ? ((sw - gw)/gw)*100 : null;
+          const overlap = (g.bbox && s.bbox) ? (Math.max(0, Math.min(g.bbox.x + g.bbox.w, s.bbox.x + s.bbox.w) - Math.max(g.bbox.x, s.bbox.x))) : 0;
+          // rule: bbox width increases >15% -> possible insertion
+          if (widthChange !== null && widthChange > 15) {
+            findings.push({ type:'inserted_digit', reason:`bbox width increased by ${widthChange.toFixed(1)}%`, gold:g.text, suspect:s.text, gold_bbox:g.bbox, suspect_bbox:s.bbox });
+          } else {
+            findings.push({ type:'token_mismatch', reason:`token mismatch (levenshtein ${best.dist})`, gold:g.text, suspect:s.text });
+          }
+        } else {
+          // non-digit token changed
+          findings.push({ type:'token_changed', reason:`text changed`, gold:g.text, suspect:s.text });
+        }
+      } else {
+        // same token: check bbox anomalies (squeezed characters)
+        if (g.bbox && s.bbox) {
+          const widthChange = ((s.bbox.w - g.bbox.w)/g.bbox.w)*100;
+          if (Math.abs(widthChange) > 15) {
+            findings.push({ type:'bbox_anomaly', reason:`bbox width change ${widthChange.toFixed(1)}%`, token:g.text, gold_bbox:g.bbox, suspect_bbox:s.bbox });
+          }
+        }
+      }
+    }
+
+    // Extra heuristic: detect tokens present only in suspect (inserted) or missing (deleted)
+    const goldTexts = new Set(goldTokens.map(t=>t.text));
+    const suspectTexts = new Set(suspectTokens.map(t=>t.text));
+    for (let s of suspectTexts) if (!goldTexts.has(s)) {
+      // if it's numeric and short, maybe an inserted digit
+      if (/^[\d\-\/:.]{1,16}$/.test(s)) findings.push({ type:'suspect_only', reason:'token present in suspect only', token:s });
+      else findings.push({ type:'suspect_only', reason:'token present in suspect only', token:s });
+    }
+    for (let g of goldTexts) if (!suspectTexts.has(g)) {
+      findings.push({ type:'gold_only', reason:'token missing in suspect', token:g });
+    }
+
+    return findings;
+  }
+
+  // Main orchestrator
+  runBtn.addEventListener('click', async () => {
+    if (!goldFileEl.files[0] || !suspectFileEl.files[0]) {
+      alert('Please select both gold (original) and suspect files.');
+      return;
+    }
+    // clear previews & output
+    previews.innerHTML = '';
+    output.textContent = JSON.stringify({ status:'running' }, null, 2);
+
+    const goldFile = goldFileEl.files[0];
+    const suspectFile = suspectFileEl.files[0];
+    showPreview(goldFile, 'Gold');
+    showPreview(suspectFile, 'Suspect');
+
+    try {
+      // 1) metadata extraction
+      output.textContent = JSON.stringify({ status:'extracting metadata' }, null, 2);
+      const [goldMeta, suspectMeta] = await Promise.all([ extractMetadata(goldFile), extractMetadata(suspectFile) ]);
+
+      // 2) render both files to bitmaps for OCR & ELA
+      output.textContent = JSON.stringify({ status:'rendering pages' }, null, 2);
+      const [goldBitmap, suspectBitmap] = await Promise.all([ renderFileToBitmap(goldFile), renderFileToBitmap(suspectFile) ]);
+
+      // 3) ELA
+      output.textContent = JSON.stringify({ status:'computing ELA' }, null, 2);
+      const [goldELA, suspectELA] = await Promise.all([ computeELA(goldBitmap), computeELA(suspectBitmap) ]);
+
+      // 4) OCR
+      output.textContent = JSON.stringify({ status:'running OCR (this may take ~20s)' }, null, 2);
+      const [goldOCR, suspectOCR] = await Promise.all([ runOCROnBitmap(goldBitmap), runOCROnBitmap(suspectBitmap) ]);
+
+      // 5) compare OCR outputs with heuristics/rules
+      output.textContent = JSON.stringify({ status:'comparing OCR & applying rules' }, null, 2);
+      const ocrFindings = compareOCR(goldOCR, suspectOCR);
+
+      // 6) Metadata diff heuristics
+      const metaFindings = [];
+      try {
+        // For PDFs: check Creator/Producer, ModifyDate vs CreateDate
+        const gm = goldMeta.raw || {};
+        const sm = suspectMeta.raw || {};
+        // generic comparisons: stringify keys
+        const goldStr = JSON.stringify(gm).toLowerCase();
+        const suspectStr = JSON.stringify(sm).toLowerCase();
+        if (goldStr !== suspectStr) metaFindings.push({ type:'metadata_difference', gold:gm, suspect:sm });
+        // heuristic: if suspect metadata mentions editors
+        const suspiciousTools = ['adobe', 'photoshop', 'foxit', 'illustrator', 'pdfelement', 'pdf editor', 'pdf-xchange'];
+        const suspectText = JSON.stringify(sm).toLowerCase();
+        for (let t of suspiciousTools) if (suspectText.includes(t)) metaFindings.push({ type:'suspicious_tool_detected', tool:t });
+      } catch(e){ metaFindings.push({type:'meta_check_error', error:e.toString()}) }
+
+      // 7) ELA hotspot detection: locate grid cells where diff is high (> threshold)
+      function analyzeELA(ela) {
+        const grid = ela.grid;
+        const hotspots = [];
+        const flat = grid.flat();
+        const mean = flat.reduce((a,b)=>a+b,0)/flat.length;
+        const std = Math.sqrt(flat.reduce((a,b)=>a+(b-mean)*(b-mean),0)/flat.length);
+        const thr = Math.max(mean + std*1.5, mean*1.8);
+        for (let y=0;y<grid.length;y++){
+          for (let x=0;x<grid[y].length;x++){
+            if (grid[y][x] > thr) hotspots.push({ gx:x, gy:y, score:grid[y][x] });
+          }
+        }
+        return { mean, std, thr, hotspots, diffDataUrl: ela.diffDataUrl };
+      }
+      const goldELAanalysis = analyzeELA(goldELA);
+      const suspectELAanalysis = analyzeELA(suspectELA);
+
+      // 8) Combine everything into JSON result
+      const result = {
+        generated_at: (new Date()).toISOString(),
+        files: {
+          gold: { name: goldFile.name, type: goldFile.type, size: goldFile.size, metadata: goldMeta },
+          suspect: { name: suspectFile.name, type: suspectFile.type, size: suspectFile.size, metadata: suspectMeta }
+        },
+        metadata_findings: metaFindings,
+        ocr: {
+          gold: { fullText: goldOCR.fullText, words_count: goldOCR.words.length },
+          suspect: { fullText: suspectOCR.fullText, words_count: suspectOCR.words.length },
+          findings: ocrFindings
+        },
+        ela: {
+          gold: goldELAanalysis,
+          suspect: suspectELAanalysis
+        },
+        summary_flags: []
+      };
+
+      // produce summary flags based on simple rules
+      if (metaFindings.some(f=>f.type==='suspicious_tool_detected')) result.summary_flags.push('suspicious_pdf_tool_detected_in_metadata');
+      if (ocrFindings.some(f=>f.type==='inserted_digit' || f.type==='suspect_only')) result.summary_flags.push('possible_inserted_digit_or_token');
+      if (suspectELAanalysis.hotspots.length > suspectELAanalysis.hotspots.length * 0.0 && suspectELAanalysis.hotspots.length > goldELAanalysis.hotspots.length + 2) {
+        result.summary_flags.push('suspect_has_more_ela_hotspots_than_gold');
+      }
+      // If suspect metadata ModifyDate unusually newer than gold CreateDate (when available)
+      try{
+        const sInfo = (suspectMeta.raw && suspectMeta.raw.info) || suspectMeta.raw;
+        const gInfo = (goldMeta.raw && goldMeta.raw.info) || goldMeta.raw;
+        const sMod = sInfo && (sInfo.ModifyDate || sInfo.ModDate || sInfo.modifyDate || sInfo.Modify);
+        const gCreate = gInfo && (gInfo.CreateDate || gInfo.CreationDate || gInfo.createDate || gInfo.Create);
+        if (sMod && gCreate) {
+          const sM = Date.parse(sMod); const gC = Date.parse(gCreate);
+          if (!isNaN(sM) && !isNaN(gC) && sM > gC + 1000*60*60*24) {
+            result.metadata_findings.push({ type:'modify_after_create', suspectModify:sMod, goldCreate:gCreate });
+            result.summary_flags.push('modify_date_after_create_date');
+          }
+        }
+      }catch(e){}
+
+      // 9) attach visual diff images as data URLs (small) to the result to help debugging
+      result.ela.gold.preview = goldELA.diffDataUrl;
+      result.ela.suspect.preview = suspectELA.diffDataUrl;
+
+      // show final JSON
+      output.textContent = JSON.stringify(result, null, 2);
+      // small friendly note
+      console.log('Tamper-check result:', result);
+    } catch (err) {
+      output.textContent = JSON.stringify({ status:'error', message: err.toString() }, null, 2);
+      console.error(err);
+    }
+  });
+  </script>
+</body>
+</html>
